@@ -3,69 +3,53 @@
 *System design interview reference — common defaults and hard limits across the stack.*
 *Compiled July 2026. Numbers are defaults/documented ceilings; most "defaults" are tunable and real-world limits are usually bound by CPU, memory, or file descriptors first.*
 
+**Column key:** *Rate Limit* = operation/connection/request ceilings (counts per second, concurrent connections). *Bandwidth* = data-size limits (payload/item/object size, MB/sec throughput).
+
 ---
 
 ## 1. Databases & Caches
 
-| System | Metric | Limit / Default | Notes |
-|---|---|---|---|
-| **PostgreSQL** | `max_connections` (default) | **100** | 3 reserved for superusers (~97 usable). Set at server start; each connection is a process, so use a pooler (PgBouncer) at scale. [1] |
-| **MySQL** | `max_connections` (default) | **151** | 150 clients + 1 admin. Max configurable: 100,000. [2] |
-| **Redis** | `maxclients` (default) | **10,000** | Capped by OS file-descriptor soft limit. [3] |
-| **MongoDB** | Max BSON document size | **16 MB** | Hard limit, enforced on every write. Use GridFS for larger. [4] |
-| **MongoDB** | `maxIncomingConnections` | **65,536** (default) | Effectively bound by OS `ulimit -n`. [4] |
-| **DynamoDB** | Per-partition throughput | **3,000 RCU / 1,000 WCU per sec** | 1 RCU = 1 strong read of ≤4 KB; 1 WCU = 1 write of ≤1 KB. [5] |
-| **DynamoDB** | Max item size | **400 KB** | Includes attribute names + values. [5] |
-| **DynamoDB** | Max data per partition | **10 GB** | Table auto-splits partitions beyond this. [5] |
-| **Cassandra** | Recommended max partition size | **< 100 MB** (ideal < 10 MB) | Rule of thumb, not enforced. Hard ceiling ~2 billion cells/partition. [6] |
-| **Cassandra** | Recommended rows per partition | **~100,000** | Best-practice guideline for performance. [6] |
+| System | Type | Description | Rate Limit | Bandwidth | Notes |
+|---|---|---|---|---|---|
+| **PostgreSQL** | Relational DB (RDBMS) | ACID relational DB, one process per connection | `max_connections` default **100** (~97 usable, 3 reserved for superusers) | — | Set at server start; use a pooler (PgBouncer) at scale. [1] |
+| **MySQL** | Relational DB (RDBMS) | Popular open-source relational DB | `max_connections` default **151** (max 100,000) | — | 150 clients + 1 admin. [2] |
+| **Redis** | In-memory KV cache | In-memory key-value store / cache | `maxclients` default **10,000** | — | Capped by OS file-descriptor soft limit. [3] |
+| **MongoDB** | Document DB (NoSQL) | Document-oriented NoSQL DB | `maxIncomingConnections` default **65,536** | Max BSON document **16 MB** (hard) | Conns bound by OS `ulimit -n`; use GridFS above 16 MB. [4] |
+| **DynamoDB** | Managed KV/Document DB | AWS managed NoSQL key-value/document store | **3,000 RCU / 1,000 WCU** per partition/sec | Item ≤ **400 KB**; partition ≤ **10 GB** | 1 RCU = 1 strong read ≤4 KB; 1 WCU = 1 write ≤1 KB. [5] |
+| **Cassandra** | Wide-column DB (NoSQL) | Distributed wide-column store | Recommended **~100,000 rows** per partition | Partition **< 100 MB** (ideal < 10 MB) | Guidelines, not enforced; hard ceiling ~2 B cells/partition. [6] |
 
 ---
 
 ## 2. Messaging & Streaming
 
-| System | Metric | Limit / Default | Notes |
-|---|---|---|---|
-| **Kafka** | Default max message size | **1 MB** (`message.max.bytes` = 1,048,576) | Match `max.request.size` (producer) and `replica.fetch.max.bytes` (broker) if raised. Large messages are an anti-pattern. [7] |
-| **Kafka** | Connections handled (per broker) | **~10K–100K+** | No low default cap; `max.connections.per.ip` effectively unbounded (managed services often set ~1,000/IP). Bound by file descriptors, RAM & request-handler threads. [11a] |
-| **RabbitMQ** | Default max message size | **128 MiB** | Configurable via `max_message_size`. [8] |
-| **RabbitMQ** | Default `channel_max` | **2,047** | Reduced from unlimited in 3.7.5; 16–128 recommended. [8] |
-| **RabbitMQ** | Connections handled (per node) | **Unlimited by default; ~10K–100K typical, 500K–1M+ tuned** | Cap via `connections_max`. Memory-bound (~RAM/CPU per connection); shrink TCP buffers to trade throughput for more connections. [11b] |
-| **Amazon SQS** | Max message payload | **256 KB** | Use S3 + pointer for larger. [9] |
-| **Amazon SQS** | Standard queue throughput | **~Unlimited** API calls/sec | Nearly unlimited per API action. [9] |
-| **Amazon SQS** | FIFO queue throughput | **300 msg/sec** (no batching) / **3,000/sec** (batches of 10) | [9] |
-| **Amazon SQS** | Connections handled | **N/A — stateless HTTPS API** | No persistent connections to count; size by throughput/request rate, not conns. [9] |
-| **Amazon Kinesis** | Per-shard write | **1 MB/sec or 1,000 records/sec** | Includes partition keys. [10] |
-| **Amazon Kinesis** | Per-shard read | **2 MB/sec, 5 GetRecords txns/sec** | Applies to provisioned & on-demand. [10] |
-| **Amazon Kinesis** | Connections handled | **N/A — stateless HTTPS API** | No persistent connections to count; size by shard count/throughput. [10] |
+| System | Type | Description | Rate Limit | Bandwidth | Notes |
+|---|---|---|---|---|---|
+| **Kafka** | Distributed log / stream | Distributed event-streaming log | **~10K–100K+** connections per broker | Default message **1 MB** (`message.max.bytes`) | Conns bound by fds/RAM/handler threads; large messages are an anti-pattern. [7][11a] |
+| **RabbitMQ** | Message broker (queue) | AMQP message broker | Connections **unlimited by default** (~10K–100K typical, 500K–1M+ tuned); `channel_max` **2,047** | Max message **128 MiB** | Memory-bound per connection; cap via `connections_max`. [8][11b] |
+| **Amazon SQS** | Managed message queue | AWS managed queue (stateless HTTPS) | Standard **~unlimited**/sec; FIFO **300/sec** (3,000 batched) | Payload ≤ **256 KB** | No persistent connections to count; size by request rate. [9] |
+| **Amazon Kinesis** | Managed stream | AWS managed data stream (stateless HTTPS) | Per shard **1,000 records/sec** write; **5 GetRecords txns/sec** read | Per shard **1 MB/s** write, **2 MB/s** read | No persistent connections; size by shard count. [10] |
 
 ---
 
 ## 3. Network, Web Servers & Load Balancers
 
-| System | Metric | Limit / Default | Notes |
-|---|---|---|---|
-| **TCP** | Port field width | **16-bit → 0–65,535** | This caps ports *per side*, NOT total connections. [11] |
-| **TCP** | Connections identified by | **4-tuple** {src IP, src port, dst IP, dst port} | A server on one port handles far more than 65 K conns; real limit = file descriptors / RAM. [11] |
-| **TCP** | Linux ephemeral port range (default) | **32,768–60,999** (~28 K ports) | IANA-recommended: 49,152–65,535. Matters for outbound/client connections. [11] |
-| **Nginx** | `worker_connections` (default) | **512** (packaged binaries set **1024**) | Total conns ≈ `worker_processes × worker_connections`. [12] |
-| **Nginx** | `keepalive_timeout` (default) | **75 sec** (client), often shown as 65 | [12] |
-| **HTTP/2** | `SETTINGS_MAX_CONCURRENT_STREAMS` | **100** (typical default) | RFC-recommended minimum; clients assume 100 before SETTINGS arrives. [13] |
-| **AWS ALB** | Idle timeout (default) | **60 sec** | Range 1–4000 sec. Scales automatically; no fixed conn/sec ceiling. [14] |
-| **HAProxy** | Global `maxconn` (default) | **≈ `ulimit -n` (usually 1024)** | Falls back to 100 only in certain auto-computed edge cases. Frontend `maxconn=0` inherits global. [15] |
+| System | Type | Description | Rate Limit | Bandwidth | Notes |
+|---|---|---|---|---|---|
+| **TCP** | Transport protocol | Core transport-layer connection protocol | **65,535** ports/side (NOT total conns); ephemeral range **32,768–60,999** (~28K) | — | Conns identified by 4-tuple → real limit = file descriptors / RAM. [11] |
+| **Nginx** | Web server / reverse proxy | Event-driven web server & reverse proxy | `worker_connections` default **512** (packaged **1024**) | — | Total conns ≈ `worker_processes × worker_connections`; `keepalive_timeout` 75s. [12] |
+| **HTTP/2** | Application protocol | Multiplexed application-layer protocol | **100** concurrent streams per connection | — | RFC-recommended default; clients assume 100 before SETTINGS. [13] |
+| **AWS ALB** | Layer-7 load balancer | AWS managed application load balancer | Auto-scales; **no fixed conn/sec cap** | — | Idle timeout default **60 sec** (range 1–4000). [14] |
+| **HAProxy** | Load balancer / proxy | TCP/HTTP load balancer | Global `maxconn` ≈ **`ulimit -n` (usually 1024)** | — | Falls back to 100 only in some auto-computed cases; frontend inherits global. [15] |
 
 ---
 
 ## 4. Cloud & API Limits (AWS)
 
-| System | Metric | Limit / Default | Notes |
-|---|---|---|---|
-| **S3** | Request rate per prefix | **3,500 PUT/COPY/POST/DELETE + 5,500 GET/HEAD per sec** | Unlimited prefixes → scale by parallelizing (10 prefixes ≈ 55,000 GET/sec). [16] |
-| **S3** | Max object size | **50 TB** (raised from 5 TB in Dec 2025) | Single PUT ≤ 5 GB; use multipart above that. [17] |
-| **AWS Lambda** | Default concurrent executions | **1,000 per region** | Soft limit, raisable via support. [18] |
-| **AWS Lambda** | Sync invocation payload | **6 MB** | Hard limit. Async payload limit is 256 KB. [18] |
-| **AWS Lambda** | Max execution timeout | **15 min** | Hard limit. [18] |
-| **API Gateway** | Default account throttle (REST) | **10,000 RPS, burst 5,000** | Rate raisable; burst is fixed. Returns HTTP 429 when exceeded. [19] |
+| System | Type | Description | Rate Limit | Bandwidth | Notes |
+|---|---|---|---|---|---|
+| **S3** | Object storage | AWS object storage | **3,500** write + **5,500** read per sec **per prefix** | Max object **50 TB** (single PUT ≤ 5 GB) | Unlimited prefixes → parallelize (10 prefixes ≈ 55,000 GET/sec). [16][17] |
+| **AWS Lambda** | Serverless compute (FaaS) | AWS event-driven serverless functions | **1,000** concurrent executions per region (soft) | Sync payload **6 MB**; async **256 KB** | Max timeout **15 min** (hard). [18] |
+| **API Gateway** | Managed API gateway | AWS managed API front door | **10,000 RPS** + burst **5,000** (REST) | — | Rate raisable, burst fixed; returns HTTP 429 when exceeded. [19] |
 
 ---
 
